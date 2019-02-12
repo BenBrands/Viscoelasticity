@@ -1,0 +1,13 @@
+subsection General
+  set Print for debugging = false
+  set Tolerance residual = 1.0e-11
+  set Displacement step increment = 0.025
+  set Total number of load steps = 20
+  set Multiplier NRsteps = 2
+  set Time increment = 0.01
+  set a = 0.0
+  set c = 1.0
+  set lambda = 12 #1913.663
+  set mu = 8 #129.506
+  set eta = 0.5 #20.
+end
