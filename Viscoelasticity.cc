@@ -13,7 +13,7 @@
 #include <deal.II/lac/trilinos_solver.h>
 
 #include <deal.II/lac/precondition.h>
-#include <deal.II/lac/constraint_matrix.h>
+//#include <deal.II/lac/affine_constraints.h>
 #include <deal.II/lac/solver_minres.h>
 #include <deal.II/lac/lapack_full_matrix.h>
 
@@ -109,7 +109,8 @@ private:
 
 	const unsigned int                 n_q_points;
 
-	ConstraintMatrix			       constraints;
+//	AffineConstraints<double>          constraints;
+	ConstraintMatrix 				constraints;
 
 	SparsityPattern					   sparsity_pattern;
 
@@ -155,6 +156,7 @@ private:
 
 
 
+// Ludwig
 template <int dim>
 Solid<dim>::Solid(std::string filename_parameters)
   :
@@ -322,89 +324,92 @@ void Solid<dim>::system_setup()
 	solution_n.reinit(dof_handler.n_dofs());
 }
 
-
-
 template <int dim>
 void Solid<dim>::assemble_system(Viscoelasticity_qp_data &qp_data,
 								 Viscoelasticity::VEM<dim> &material)
 {
-	std::cout << " Assembly " << std::flush;
+	// Create FEValues named "fe_v" with the fe-element "fe" and the quadrature rule "qf_cell"
+	// we further need information about the values, the gradients and the weights
+	// at every quadrature point. You find further information in
+	// https://www.dealii.org/9.0.0/doxygen/deal.II/classFEValuesViews_1_1Vector.html#a9e2686feec1a56451b674431b63c92d1
 
-	FEValues<dim> fe_v(fe,
-					   qf_cell,
-					   update_values| update_gradients| update_JxW_values);
 
-	FullMatrix<double> cell_matrix(dofs_per_cell,dofs_per_cell);
+	// create "cell_matrix" and define its size and call the FullMatrix<double> "cell_matrix".
+	// The size equals "dofs_per_cell" x "dofs_per_cell"
 
-	Vector<double> cell_rhs(dofs_per_cell);
+	// create "cell_rhs" and define its size and call the Vector<double> "cell_rhs"
+	// The size equals "dofs_per_cell".
 
+	// this vector stores the global dof indices of the local dof indices
 	std::vector<types::global_dof_index> local_dof_indices(dofs_per_cell);
 
+	// This is the solution of the last iteration.
 	Vector<double> current_solution = get_total_solution(this->solution_delta);
 
-	bool flag = parameter.print_debug;
-
+	// cell_counter. We need it to extract cell-related quantities
 	unsigned int cell_counter = 0;
 
+	// start loop over all cells. Therefore we use dof_handler
 	for (auto cell : dof_handler.active_cell_iterators())
 	{
-		cell_matrix=0.0;
+		// TODO initialise "cell_matrix" and "cell_rhs"
 
-		cell_rhs=0.0;
-
-		fe_v.reinit(cell);
+		// TODO initialise the FEValues "fe_v" for every cell with the command reinit(cell);
 
 		std::vector<Tensor<2,dim>> solution_grads_u(n_q_points);
 
-		fe_v[u_fe].get_function_gradients(current_solution,solution_grads_u);
+		// TODO extract solution_gradients at each quadrature point. Therefore use get_function_gradients
+		// from FEValues class. Have again a look at
+		// https://www.dealii.org/9.0.0/doxygen/deal.II/classFEValuesViews_1_1Vector.html#a9e2686feec1a56451b674431b63c92d1
 
+		// here, we fill "local_dof_indices" with the corresponding global dof indices
 		cell->get_dof_indices(local_dof_indices);
 
+		// loop over all quadrature points
 		for(unsigned int qp=0; qp<n_q_points;++qp)
 		{
-			Tensor<2,dim> DeformationGradient =  Auxiliary_Functions::I<dim>() + solution_grads_u[qp];
+			// initialise DeformationGradient
+			Tensor<2,dim> DeformationGradient;
 
-			material.time_integration(time,qp_data[cell_counter][qp],DeformationGradient,flag,parameter.delta_t);
+			// TODO calculate deformation_gradient
 
+			// here, we perform what is nescessary for viscoelasticity
+			material.time_integration(time,qp_data[cell_counter][qp],DeformationGradient,false,parameter.delta_t);
+			// we then extract the first Piola-Kirchhoff stress
 			Tensor<2,dim> P = material.get_P(DeformationGradient,qp_data[cell_counter][qp]);
-
+            // and the tangent
 			Tensor<4,dim> dP_dF = material.get_dP_dF(DeformationGradient,qp_data[cell_counter][qp],time);
 
-			if (flag)
-			{
-				std::cout << "  F: " << std::fixed << std::setprecision(10) << DeformationGradient << std::endl;
-				std::cout << "  current_solution: " << std::fixed << std::setprecision(10) << current_solution << std::endl;
-			}
+			// Initialise mapped weight of quadrature point
+			const double JxW;
 
-			const double JxW = fe_v.JxW(qp);
+			// TODO extract "JxW" from "fe_v"
 
 			for(unsigned int i=0; i<dofs_per_cell; ++i)
 			{
-				const unsigned int component_i = fe.system_to_component_index(i).first;
+				// initialise gradient of shape function i
+				Tensor <2,dim> shape_grad_i;
 
-				Tensor<1,dim> shape_grad_i_vec = fe_v.shape_grad(i,qp);
+				// TODO obtain "shape_grad_i"
 
-				cell_rhs(i) -= (P * shape_grad_i_vec)[component_i] * JxW;
+				// TODO fill values of "cell_rhs"
+				// cell_rhs(i)-=...
 
 				for(unsigned int j=0; j<dofs_per_cell; ++j)
 				{
-					const unsigned int component_j = fe.system_to_component_index(j).first;
+					// initialise gradient of shape function j
+					Tensor <2,dim> shape_grad_j;
 
-					Tensor<1,dim> shape_grad_j_vec = fe_v.shape_grad(j,qp);
+					// TODO obtain "shape_grad_j"
 
-					Tensor<2,dim> K = Auxiliary_Functions::tangent_multiplication(dP_dF,shape_grad_i_vec,shape_grad_j_vec);
-
-					cell_matrix(i,j) += K[component_i][component_j] * JxW;
+					// TODO fill values of system_matrix"
+					// cell_matrix(i,j)+=...
 				}
-				flag = false;
+
 			}
 		}
-		constraints.distribute_local_to_global(cell_matrix,
-                                           	   cell_rhs,
-											   local_dof_indices,
-											   tangent_matrix,
-											   system_rhs,
-											   false);
+
+		// TODO Assemble local to global, taking into account all constraints.
 
 		++cell_counter;
 	}
@@ -476,55 +481,48 @@ void Solid<dim>::make_constraints(const int &it_nr)
 }
 
 
-
 template <int dim>
 void Solid<dim>::solve_load_step_NR(Viscoelasticity_qp_data &qp_data,
 									Viscoelasticity::VEM<dim> &material,
 									Vector<double> &solution_delta)
 {
+	// Vector containing the solution of the linear system.
 	Vector<double> newton_update(dof_handler.n_dofs());
 
-    error_residual.reset();
-
-    error_residual_0.reset();
-
-    error_residual_norm.reset();
-
+	// print some information for output in console
     print_conv_header();
 
-    for (unsigned int newton_iteration = 0; newton_iteration < max_number_newton_iterations; ++newton_iteration)
+    // TODO make a loop from 0 to "max_number_of_iterations". Call the counting variable
+    // "newton_iteration"
+    // for (unsigned int newton_iteration .....)
     {
-    	std::cout << " " << std::setw(2) << newton_iteration << " " << std::flush;
+    	// TODO reinitialise "tangent_matrix" and "system_rhs". So set them equal to zero
 
-    	tangent_matrix = 0.0;
-    	system_rhs = 0.0;
+    	// TODO Call function "make_constraints". The input variable is the current "newton_iteration"
 
-    	make_constraints(newton_iteration);
+    	// TODO Call function "assemble_system". Its input variables are the quadrature point history
+    	// "qp_data" and the material properties "material". They also appear as variables in
+    	// the current function.
 
-    	assemble_system(qp_data, material);
-
-    	get_error_residual(error_residual);
-
-    	if (newton_iteration == 0)
-    		error_residual_0 = error_residual;
-
-    	error_residual_norm = error_residual;
-    	error_residual_norm.normalise(error_residual_0);
-
-    	if (newton_iteration > 0 && error_residual.u <= parameter.tolerance_residual)
+    	// TODO Check if the Newton-scheme already converged. Therefore, compare the l2_norm() of the
+    	// "system_rhs" with the required tolerance, obtained with "parameter.tolerance_residual". In addition
+    	// the current "newton_iteration" shall be gerater 0.
     	{
+    		// if converged
     		std::cout << " CONVERGED! " << std::endl;
     		print_conv_footer();
     		break;
     	}
 
+    	// Solve linear system of equation.
     	const std::pair<unsigned int,double> lin_solver_output = solve_linear_system(newton_update);
 
-    	solution_delta += newton_update;
+    	// TODO update "solution_delta" with the incremental solution
 
-    	std::cout << " | " << std::fixed << std::setprecision(3) << std::setw(17)
+    	// some informations about the iteration are printed
+    	std::cout << " | " << std::fixed << std::setprecision(3) << std::setw(25)
     			  << std::scientific << lin_solver_output.first << "  "
-				  << lin_solver_output.second << "  " << error_residual.u
+				  << lin_solver_output.second << "  " << system_rhs.l2_norm()
 				  << "  " << std::endl;
     }
 }
@@ -564,9 +562,9 @@ void Solid<dim>::print_conv_footer()
 
 	std::cout << std::endl;
 
-	std::cout << "Norm of residuum:\t\t"
-			  << error_residual_norm.u << std::endl
-			  << std::endl;
+//	std::cout << "Norm of residuum:\t\t"
+//			  << error_residual_norm.u << std::endl
+//			  << std::endl;
 }
 
 
@@ -603,20 +601,14 @@ std::pair<unsigned int, double>
 Solid<dim>::solve_linear_system(Vector<double> &newton_update)
 {
 	const bool it_solver=false;
-
 	unsigned int lin_it = 0;
 	double lin_res = 0.0;
-
 	newton_update=0;
-
 	std::cout << " SLV " << std::flush;
-
 	if (it_solver)
 	{
 		const int solver_its = tangent_matrix.m();
-
 		const double tol_sol = 1e-12;
-
 		SolverControl solver_control(solver_its, tol_sol);
 		SolverGMRES<Vector<double> > solver_GMRES(solver_control);
 		solver_GMRES.solve(tangent_matrix,
@@ -625,7 +617,6 @@ Solid<dim>::solve_linear_system(Vector<double> &newton_update)
 						   PreconditionIdentity());
 
 		lin_it = solver_control.last_step();
-
 		lin_res = solver_control.last_value();
 	}
 	else
@@ -637,9 +628,53 @@ Solid<dim>::solve_linear_system(Vector<double> &newton_update)
 		lin_it = 1;
 	}
 	constraints.distribute(newton_update);
-
 	return std::make_pair(lin_it,lin_res);
 }
+
+//template <int dim>
+//std::pair<unsigned int, double>
+//Solid<dim>::solve_linear_system(Vector<double> &newton_update)
+//{
+//	// "it_solver" defines, if an iterative solver shall be used or not
+//	const bool it_solver=false;
+//
+//	// initialise two values evaluating the iterative solver
+//	// "lin_it" defines how many iterations the iterative solver needed
+//	// "lin_res" defines the residual, when a solution is obtained
+//	unsigned int lin_it = 0;
+//	double lin_res = 0.0;
+//
+//	// TODO initialise "newton_update"
+//
+//	// output
+//	std::cout << " SLV " << std::flush;
+//
+//	if (it_solver)
+//	{
+//		// TODO create an iterative solver (GMR), where the system matrix is
+//		// called "tangent_matrix" and the residual is called "system_rhs".
+//		// Both are global variables
+//
+//		// TODO extract iteration and residual, of converged iteration
+//
+//		// You find more informations also on:
+//		// https://www.dealii.org/9.0.0/doxygen/deal.II/classSolver.html
+//	}
+//	else
+//	{
+//		// TODO create a direct solver, where the system matrix is called
+//		//"tangent_matrix" and the residual is called "system_rhs". Both are
+//		// global variables.
+//
+//		// a direct solver only requires one iteration
+//		lin_it = 1;
+//	}
+//
+//	// distribute constraints
+//	// TODO distribute constraints to the solution
+//
+//	return std::make_pair(lin_it,lin_res);
+//}
 
 
 
