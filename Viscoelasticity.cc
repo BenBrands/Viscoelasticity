@@ -13,6 +13,7 @@
 #include <deal.II/lac/trilinos_solver.h>
 
 #include <deal.II/lac/precondition.h>
+//#include <deal.II/lac/affine_constraints.h>
 #include <deal.II/lac/constraint_matrix.h>
 #include <deal.II/lac/solver_minres.h>
 #include <deal.II/lac/lapack_full_matrix.h>
@@ -23,6 +24,7 @@
 #include <deal.II/grid/grid_generator.h>
 #include <deal.II/grid/tria_accessor.h>
 #include <deal.II/grid/tria_iterator.h>
+#include <deal.II/grid/manifold_lib.h>
 
 #include <deal.II/dofs/dof_tools.h>
 #include <deal.II/dofs/dof_renumbering.h>
@@ -109,7 +111,7 @@ private:
 
 	const unsigned int                 n_q_points;
 
-	ConstraintMatrix			       constraints;
+	ConstraintMatrix		           constraints;
 
 	SparsityPattern					   sparsity_pattern;
 
@@ -244,13 +246,29 @@ void Solid<dim>::make_grid()
 {
 	AssertThrow(dim==3,ExcMessage("make_grid() only works for dim=3"));
 
+	// hyper rectangle
 	Point<dim> p1(0,-1,0);
 	Point<dim> p2(1,1,1);
 
-	const std::vector<unsigned int> repetitions{1,2,1};
+	const std::vector<unsigned int> repetitions{3,5,3};
 
 	GridGenerator::subdivided_hyper_rectangle(triangulation,repetitions,p1,p2);
 
+//	// hyper cube with cylindrical hole
+//	const double inner_radius = 0.25;
+//	const double outer_radius = 0.5;
+//	const double dimension_in_z = 0.5;
+//	unsigned int repetitions_in_z = 2;
+//	const bool colorize = false;
+//	GridGenerator::hyper_cube_with_cylindrical_hole(triangulation,
+//													inner_radius,
+//													outer_radius,
+//													dimension_in_z,
+//													repetitions_in_z,
+//													colorize);
+
+
+	// assign boundary ids
 	for (auto cell : triangulation.active_cell_iterators())
 		if (cell->at_boundary())
 			for (unsigned int f = 0; f < GeometryInfo<dim>::faces_per_cell; ++f)
@@ -282,11 +300,38 @@ void Solid<dim>::make_grid()
 					else if (face_center[2] == 1)
 						cell->face(f)->set_boundary_id(6);
 				}
-	//triangulation.refine_global(2);
+
+	//global refinement
+	triangulation.refine_global(2);
+
+
+	//local refinement
+	for (auto cell : triangulation.active_cell_iterators()){
+		// based on location of cell_center
+		if(cell->center()[2]< 0.5){
+			cell->set_refine_flag();
+		}
+		else{
+			cell->set_coarsen_flag();
+		}
+		// based on material_id
+//		if(cell->material_id()==2){
+//			cell->set_refine_flag();
+//		}
+	}
+	triangulation.execute_coarsening_and_refinement();
+
+	std::cout<< "Number of active cells: "
+			<< triangulation.n_active_cells()
+			<< std::endl;
+	std::cout<< "Total number of cells: "
+			<< triangulation.n_cells()
+			<< std::endl;
 
 	GridOut grid_out;
 	std::ofstream output("mesh.vtu");
 	grid_out.write_vtu(triangulation,output);
+	exit(0);
 }
 
 
@@ -295,6 +340,10 @@ template <int dim>
 void Solid<dim>::system_setup()
 {
 	dof_handler.distribute_dofs(fe);
+	std::cout<< "Number of degrees of freedom: "
+			<< dof_handler.n_dofs()
+			<< std::endl;
+
 
 	DoFRenumbering::Cuthill_McKee(dof_handler);
 	
@@ -328,86 +377,7 @@ template <int dim>
 void Solid<dim>::assemble_system(Viscoelasticity_qp_data &qp_data,
 								 Viscoelasticity::VEM<dim> &material)
 {
-	std::cout << " Assembly " << std::flush;
 
-	FEValues<dim> fe_v(fe,
-					   qf_cell,
-					   update_values| update_gradients| update_JxW_values);
-
-	FullMatrix<double> cell_matrix(dofs_per_cell,dofs_per_cell);
-
-	Vector<double> cell_rhs(dofs_per_cell);
-
-	std::vector<types::global_dof_index> local_dof_indices(dofs_per_cell);
-
-	Vector<double> current_solution = get_total_solution(this->solution_delta);
-
-	bool flag = parameter.print_debug;
-
-	unsigned int cell_counter = 0;
-
-	for (auto cell : dof_handler.active_cell_iterators())
-	{
-		cell_matrix=0.0;
-
-		cell_rhs=0.0;
-
-		fe_v.reinit(cell);
-
-		std::vector<Tensor<2,dim>> solution_grads_u(n_q_points);
-
-		fe_v[u_fe].get_function_gradients(current_solution,solution_grads_u);
-
-		cell->get_dof_indices(local_dof_indices);
-
-		for(unsigned int qp=0; qp<n_q_points;++qp)
-		{
-			Tensor<2,dim> DeformationGradient =  Auxiliary_Functions::I<dim>() + solution_grads_u[qp];
-
-			material.time_integration(time,qp_data[cell_counter][qp],DeformationGradient,flag,parameter.delta_t);
-
-			Tensor<2,dim> P = material.get_P(DeformationGradient,qp_data[cell_counter][qp]);
-
-			Tensor<4,dim> dP_dF = material.get_dP_dF(DeformationGradient,qp_data[cell_counter][qp],time);
-
-			if (flag)
-			{
-				std::cout << "  F: " << std::fixed << std::setprecision(10) << DeformationGradient << std::endl;
-				std::cout << "  current_solution: " << std::fixed << std::setprecision(10) << current_solution << std::endl;
-			}
-
-			const double JxW = fe_v.JxW(qp);
-
-			for(unsigned int i=0; i<dofs_per_cell; ++i)
-			{
-				const unsigned int component_i = fe.system_to_component_index(i).first;
-
-				Tensor<1,dim> shape_grad_i_vec = fe_v.shape_grad(i,qp);
-
-				cell_rhs(i) -= (P * shape_grad_i_vec)[component_i] * JxW;
-
-				for(unsigned int j=0; j<dofs_per_cell; ++j)
-				{
-					const unsigned int component_j = fe.system_to_component_index(j).first;
-
-					Tensor<1,dim> shape_grad_j_vec = fe_v.shape_grad(j,qp);
-
-					Tensor<2,dim> K = Auxiliary_Functions::tangent_multiplication(dP_dF,shape_grad_i_vec,shape_grad_j_vec);
-
-					cell_matrix(i,j) += K[component_i][component_j] * JxW;
-				}
-				flag = false;
-			}
-		}
-		constraints.distribute_local_to_global(cell_matrix,
-                                           	   cell_rhs,
-											   local_dof_indices,
-											   tangent_matrix,
-											   system_rhs,
-											   false);
-
-		++cell_counter;
-	}
 }
 
 
@@ -482,51 +452,7 @@ void Solid<dim>::solve_load_step_NR(Viscoelasticity_qp_data &qp_data,
 									Viscoelasticity::VEM<dim> &material,
 									Vector<double> &solution_delta)
 {
-	Vector<double> newton_update(dof_handler.n_dofs());
 
-    error_residual.reset();
-
-    error_residual_0.reset();
-
-    error_residual_norm.reset();
-
-    print_conv_header();
-
-    for (unsigned int newton_iteration = 0; newton_iteration < max_number_newton_iterations; ++newton_iteration)
-    {
-    	std::cout << " " << std::setw(2) << newton_iteration << " " << std::flush;
-
-    	tangent_matrix = 0.0;
-    	system_rhs = 0.0;
-
-    	make_constraints(newton_iteration);
-
-    	assemble_system(qp_data, material);
-
-    	get_error_residual(error_residual);
-
-    	if (newton_iteration == 0)
-    		error_residual_0 = error_residual;
-
-    	error_residual_norm = error_residual;
-    	error_residual_norm.normalise(error_residual_0);
-
-    	if (newton_iteration > 0 && error_residual.u <= parameter.tolerance_residual)
-    	{
-    		std::cout << " CONVERGED! " << std::endl;
-    		print_conv_footer();
-    		break;
-    	}
-
-    	const std::pair<unsigned int,double> lin_solver_output = solve_linear_system(newton_update);
-
-    	solution_delta += newton_update;
-
-    	std::cout << " | " << std::fixed << std::setprecision(3) << std::setw(17)
-    			  << std::scientific << lin_solver_output.first << "  "
-				  << lin_solver_output.second << "  " << error_residual.u
-				  << "  " << std::endl;
-    }
 }
 
 
@@ -602,43 +528,7 @@ template <int dim>
 std::pair<unsigned int, double>
 Solid<dim>::solve_linear_system(Vector<double> &newton_update)
 {
-	const bool it_solver=false;
 
-	unsigned int lin_it = 0;
-	double lin_res = 0.0;
-
-	newton_update=0;
-
-	std::cout << " SLV " << std::flush;
-
-	if (it_solver)
-	{
-		const int solver_its = tangent_matrix.m();
-
-		const double tol_sol = 1e-12;
-
-		SolverControl solver_control(solver_its, tol_sol);
-		SolverGMRES<Vector<double> > solver_GMRES(solver_control);
-		solver_GMRES.solve(tangent_matrix,
-						   newton_update,
-						   system_rhs,
-						   PreconditionIdentity());
-
-		lin_it = solver_control.last_step();
-
-		lin_res = solver_control.last_value();
-	}
-	else
-	{
-		SparseDirectUMFPACK direct_solver;
-		direct_solver.initialize(tangent_matrix);
-		direct_solver.vmult(newton_update,system_rhs);
-
-		lin_it = 1;
-	}
-	constraints.distribute(newton_update);
-
-	return std::make_pair(lin_it,lin_res);
 }
 
 
@@ -647,29 +537,7 @@ template <int dim>
 void Solid<dim>::output_results(Viscoelasticity_qp_data &/*viscoplasticity_gauss_point_data*/,
 								Viscoelasticity::VEM<dim> &/*material*/)
 {
-    DataOut<dim> data_out;
-    data_out.attach_dof_handler(dof_handler);
 
-    std::vector<DataComponentInterpretation::DataComponentInterpretation>
-    data_component_interpretation(dim,DataComponentInterpretation::component_is_part_of_vector);
-
-    std::vector<std::string> solution_name(dim,"u");
-
-    data_out.add_data_vector(solution_n,
-                             solution_name,
-                             DataOut<dim>::type_dof_data,
-                             data_component_interpretation);
-
-    data_out.build_patches();
-
-    std::string filename = "solution-" + Utilities::to_string(current_load_step) + ".vtu";
-
-    std::ofstream output(filename);
-    data_out.write_vtu(output);
-
-    times_and_names.push_back(std::pair<double,std::string>(time,filename));
-    std::ofstream pvd_output("solution.pvd");
-    DataOutBase::write_pvd_record(pvd_output,times_and_names);
 }
 //--------------------------------------------------------------------------
 
@@ -689,6 +557,7 @@ int main ()
 	  
 		Solid<dim> solid_xd(parameterfilename);
 		solid_xd.run();
+
     }
   catch (std::exception &exc)
     {
@@ -714,3 +583,4 @@ int main ()
     }
   return 0;
 }
+
